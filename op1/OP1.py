@@ -100,6 +100,20 @@ class OP1(ControlSurface):
             self.clip_color_callbacks = {}
             self.slot_callbacks = {}
 
+            # Overlay state: lets any callback briefly take over the bottom
+            # text display with a label/value pair that then fades back to
+            # whatever the current mode would normally draw.
+            self._overlay_until = 0.0
+            self._overlay_was_shown = False
+            self._suppress_overlay_until = 0.0
+
+            # Live-parameter and track listeners used for knob/button feedback.
+            self._param_listeners = []
+            self._track_listeners = []
+            self._is_playing_cb = None
+            self._session_record_cb = None
+            self._record_mode_cb = None
+
             self.text_start_sequence = (0xf0, 0x00, 0x20, 0x76, 0x00, 0x03)
             self.text_end_sequence = (0xf7,)
             self.enable_sequence = (0xf0, 0x00, 0x20, 0x76, 0x00, 0x01, 0x02, 0xf7)
@@ -266,6 +280,9 @@ class OP1(ControlSurface):
             # adding value listener for selected scene change
             self.song().view.add_selected_scene_listener(self.selected_scene_changed)
 
+            # Overlay feedback for transport state (play, session rec, arr rec).
+            self._attach_transport_listeners()
+
             # setting assignments for currently selected track
             self.selected_track_changed()
 
@@ -362,6 +379,169 @@ class OP1(ControlSurface):
         # Live 11+ passes (track_offset, scene_offset); older versions pass nothing.
         self.update_display_clips()
 
+    # ---------- Display overlay ----------
+
+    def set_overlay(self, line1, line2="", duration=1.2):
+        """Briefly show line1/line2 on the OP-1 bottom text, then let
+        update_display() return the screen to its mode-appropriate contents."""
+        if time.time() < self._suppress_overlay_until:
+            return
+        msg = line1 if not line2 else (line1 + "\r" + line2)
+        self.write_text(msg)
+        self._overlay_until = time.time() + duration
+        self._overlay_was_shown = True
+
+    def _redraw_mode(self):
+        mode = self._operation_mode_selector.mode_index
+        if mode == consts.OP1_MODE_PERFORM:
+            self.update_display_perform_mode()
+        elif mode == consts.OP1_MODE_CLIP:
+            self.update_display_clip_mode()
+        elif mode == consts.OP1_MODE_TRANSPORT:
+            self.update_display_transport_mode()
+        elif mode == consts.OP1_MODE_MIXER:
+            self.update_display_mixer_mode()
+
+    # ---------- Live parameter listeners (knob readout) ----------
+
+    def _detach_param_listeners(self):
+        for param, cb in self._param_listeners:
+            try:
+                if param.value_has_listener(cb):
+                    param.remove_value_listener(cb)
+            except (RuntimeError, AssertionError, AttributeError):
+                pass
+        self._param_listeners = []
+
+    def _attach_param_listeners(self, track):
+        self._detach_param_listeners()
+        if track is None:
+            return
+        md = getattr(track, "mixer_device", None)
+        if md is None:
+            return
+
+        def hook(param, label):
+            if param is None:
+                return
+            cb = lambda: self._on_param_changed(param, label)
+            try:
+                param.add_value_listener(cb)
+                self._param_listeners.append((param, cb))
+            except (RuntimeError, AssertionError, AttributeError):
+                pass
+
+        hook(getattr(md, "volume", None), "vol")
+        hook(getattr(md, "panning", None), "pan")
+        sends = getattr(md, "sends", ())
+        for i, send in enumerate(sends[:2]):
+            hook(send, "send " + chr(ord("a") + i))
+
+    def _on_param_changed(self, param, label):
+        try:
+            value_str = param.str_for_value(param.value)
+        except Exception:
+            value_str = str(round(param.value, 3))
+        self.set_overlay(label, to_op1_printable(value_str), duration=1.0)
+
+    # ---------- Track mute/solo/arm listeners ----------
+
+    def _detach_track_listeners(self):
+        for track, kind, cb in self._track_listeners:
+            try:
+                if kind == "mute" and track.mute_has_listener(cb):
+                    track.remove_mute_listener(cb)
+                elif kind == "solo" and track.solo_has_listener(cb):
+                    track.remove_solo_listener(cb)
+                elif kind == "arm" and track.arm_has_listener(cb):
+                    track.remove_arm_listener(cb)
+            except (RuntimeError, AssertionError, AttributeError):
+                pass
+        self._track_listeners = []
+
+    def _attach_track_listeners(self, track):
+        self._detach_track_listeners()
+        if track is None:
+            return
+        is_master = (track == self.song().master_track)
+
+        if not is_master:
+            cb_mute = lambda: self.set_overlay("mute", "on" if track.mute else "off")
+            try:
+                track.add_mute_listener(cb_mute)
+                self._track_listeners.append((track, "mute", cb_mute))
+            except (RuntimeError, AssertionError, AttributeError):
+                pass
+
+        cb_solo = lambda: self.set_overlay("solo", "on" if track.solo else "off")
+        try:
+            track.add_solo_listener(cb_solo)
+            self._track_listeners.append((track, "solo", cb_solo))
+        except (RuntimeError, AssertionError, AttributeError):
+            pass
+
+        if getattr(track, "can_be_armed", False):
+            cb_arm = lambda: self.set_overlay("arm", "on" if track.arm else "off")
+            try:
+                track.add_arm_listener(cb_arm)
+                self._track_listeners.append((track, "arm", cb_arm))
+            except (RuntimeError, AssertionError, AttributeError):
+                pass
+
+    # ---------- Transport state listeners ----------
+
+    def _attach_transport_listeners(self):
+        song = self.song()
+
+        def on_is_playing():
+            self.set_overlay("transport", "playing" if song.is_playing else "stopped")
+
+        def on_session_record():
+            self.set_overlay("session rec", "on" if song.session_record else "off")
+
+        def on_record_mode():
+            self.set_overlay("arr. rec", "on" if song.record_mode else "off")
+
+        try:
+            song.add_is_playing_listener(on_is_playing)
+            self._is_playing_cb = on_is_playing
+        except (RuntimeError, AssertionError, AttributeError):
+            self._is_playing_cb = None
+        try:
+            song.add_session_record_listener(on_session_record)
+            self._session_record_cb = on_session_record
+        except (RuntimeError, AssertionError, AttributeError):
+            self._session_record_cb = None
+        try:
+            song.add_record_mode_listener(on_record_mode)
+            self._record_mode_cb = on_record_mode
+        except (RuntimeError, AssertionError, AttributeError):
+            self._record_mode_cb = None
+
+    def _detach_transport_listeners(self):
+        song = self.song()
+        if self._is_playing_cb is not None:
+            try:
+                if song.is_playing_has_listener(self._is_playing_cb):
+                    song.remove_is_playing_listener(self._is_playing_cb)
+            except (RuntimeError, AssertionError, AttributeError):
+                pass
+            self._is_playing_cb = None
+        if self._session_record_cb is not None:
+            try:
+                if song.session_record_has_listener(self._session_record_cb):
+                    song.remove_session_record_listener(self._session_record_cb)
+            except (RuntimeError, AssertionError, AttributeError):
+                pass
+            self._session_record_cb = None
+        if self._record_mode_cb is not None:
+            try:
+                if song.record_mode_has_listener(self._record_mode_cb):
+                    song.remove_record_mode_listener(self._record_mode_cb)
+            except (RuntimeError, AssertionError, AttributeError):
+                pass
+            self._record_mode_cb = None
+
     def selected_scene_changed(self):
         # if on clip mode update display
         if (self._operation_mode_selector.mode_index == consts.OP1_MODE_CLIP):
@@ -454,6 +634,9 @@ class OP1(ControlSurface):
     def clear_track_button_callback(self, value):
         # if clear track button was called, reset track
         if (value == 127):
+            # Suppress the storm of mute/solo/arm overlays we're about to
+            # cause; a single "clear all" message is more useful.
+            self._suppress_overlay_until = time.time() + 0.5
             for i in range(len(self.song().tracks)):
                 track = self.song().tracks[i]
                 if track.can_be_armed is True:
@@ -464,6 +647,10 @@ class OP1(ControlSurface):
             for i in range(len(self.song().return_tracks)):
                 self.song().return_tracks[i].solo = 0
                 self.song().return_tracks[i].mute = 0
+
+            # Lift the suppression and show the one summary line.
+            self._suppress_overlay_until = 0.0
+            self.set_overlay("clear all", "done")
 
     def clear_return_track_assignment(self, strip):
         # clear return track assingments
@@ -506,6 +693,14 @@ class OP1(ControlSurface):
 
         # getting selected strip
         self._channel_strip = self._mixer.selected_strip()
+
+        # Rewire feedback listeners to the newly-selected track. The suppression
+        # window prevents the knob-readout overlay from firing on the spurious
+        # value_listener callbacks Live emits right after a track switch.
+        track = getattr(self._channel_strip, "_track", None)
+        self._suppress_overlay_until = time.time() + 0.15
+        self._attach_param_listeners(track)
+        self._attach_track_listeners(track)
 
         # setting solo button
         self._channel_strip.set_solo_button(self._ss6_button)
@@ -684,6 +879,15 @@ class OP1(ControlSurface):
             self.retries_count += 1
             self._send_midi(self.enable_sequence)
 
+        # Keep an active overlay on screen until it expires, then force one
+        # redraw so non-periodic modes (perform / clip / mixer) come back.
+        if time.time() < self._overlay_until:
+            return
+        if self._overlay_was_shown:
+            self._overlay_was_shown = False
+            if (self._operation_mode_selector.mode_index != consts.OP1_MODE_TRANSPORT):
+                self._redraw_mode()
+
         # if in transport mode, update display with song position
         if (self._operation_mode_selector.mode_index == consts.OP1_MODE_TRANSPORT):
             self.update_display_transport_mode()
@@ -740,6 +944,10 @@ class OP1(ControlSurface):
 
     def disconnect(self):
         self.rem_clip_slot_listeners()
+
+        self._detach_param_listeners()
+        self._detach_track_listeners()
+        self._detach_transport_listeners()
 
         try:
             self.song().view.remove_selected_track_listener(self.selected_track_changed)

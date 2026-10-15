@@ -268,6 +268,11 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
         # TODO : can index > 12 or < 0 ?
         self._parent.song().loop_length = 2**index
 
+    def _overlay(self, line1, line2="", duration=1.2):
+        parent = self._parent
+        if parent is not None and hasattr(parent, "set_overlay"):
+            parent.set_overlay(line1, line2, duration=duration)
+
     def note_key_pressed(self, value, sender):
         # determining index of note key button in list
         index = self.note_keys_buttons.index(sender)
@@ -290,6 +295,11 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
         elif (self._current_mode == consts.OP1_MODE_TRANSPORT):
             # if on transport mode, use key to set loop
             self.set_loop(index, False)
+            self._overlay("loop", str(2 ** index) + " bars")
+
+        elif (self._current_mode == consts.OP1_MODE_CLIP):
+            if value == 127:
+                self._overlay("launch", "clip " + str(index + 1))
 
     def note_key_shifted_pressed(self, value, sender):
         # determining index of note key button in list
@@ -298,6 +308,11 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
         if (self._current_mode == consts.OP1_MODE_TRANSPORT):
             # if on transport mode, use key to set loop with loop start change
             self.set_loop(index, True)
+            self._overlay("loop start", str(2 ** index) + " bars")
+
+        elif (self._current_mode == consts.OP1_MODE_CLIP):
+            if value == 127:
+                self._overlay("stop", "track " + str(index + 1))
 
     def clip_color_changed(self):
         self._parent.log("clip color changed")
@@ -419,6 +434,15 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
             # setting scene launch button
             self._session.scene(0).set_launch_button(self.note_keys_buttons[consts.NUM_TRACKS])
 
+            # Parallel listeners so the launch key also triggers the overlay
+            # feedback. The launch mapping handles the actual trigger; this
+            # listener runs alongside it just to drive the display.
+            for i in range(consts.NUM_TRACKS):
+                self.note_keys_buttons[i].add_value_listener(self.note_key_pressed, True)
+            for i in range(consts.NUM_TRACKS):
+                self.note_keys_shifted_buttons[i].add_value_listener(
+                    self.note_key_shifted_pressed, True)
+
 
 
             # perform track assignments
@@ -485,6 +509,12 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
 
         elif (self._current_mode == consts.OP1_MODE_CLIP):
             self._parent.log("CLEARING CLIP MODE")
+
+            # tear down parallel overlay listeners
+            for btn in self.note_keys_buttons:
+                self._safe_remove(btn, self.note_key_pressed)
+            for btn in self.note_keys_shifted_buttons:
+                self._safe_remove(btn, self.note_key_shifted_pressed)
 
             # clearing session track bank buttons
             self._session.set_track_bank_buttons(None, None)
