@@ -421,8 +421,13 @@ class OP1(ControlSurface):
                 self.song().start_playing()
 
     def record_button_callback(self, value):
-        if value == 127:
-            self.song().record_mode = not self.song().record_mode
+        if value != 127:
+            return
+        song = self.song()
+        if self.shift_pressed is True:
+            song.record_mode = not song.record_mode
+        else:
+            song.session_record = not song.session_record
 
     def mode_index_changed(self):
 
