@@ -121,6 +121,14 @@ class OP1(ControlSurface):
 
             self.show_message("Version: " + consts.VERSION)
 
+            # Put the OP-1 into Ableton Live display mode up front. In older Live
+            # versions the display-mode handshake went through update_display() ->
+            # device-inquiry -> handle_sysex(); Live 12's scheduler no longer
+            # drives update_display reliably, so we send the enable sequence
+            # directly and treat the device as connected.
+            self._send_midi(self.enable_sequence)
+            self.device_connected = True
+
             # reseting text
             self.write_text(' ')
 
@@ -664,12 +672,12 @@ class OP1(ControlSurface):
         self.write_text("sel. track\r" + txt)
 
     def update_display(self):
-        if not(self.device_connected):
-            if (self.retries_count < 5):
-                self.log("TRYING OP-1 CONNECTION")
-                self.retries_count += 1
-                self._send_midi(self.id_sequence)
-                time.sleep(1)
+        # Re-arm Ableton Live display mode a few times after load. We never
+        # block the main thread here (the old time.sleep(1) stalled Live 12's
+        # scheduler); the resends are cheap and the OP-1 ignores extras.
+        if self.retries_count < 5:
+            self.retries_count += 1
+            self._send_midi(self.enable_sequence)
 
         # if in transport mode, update display with song position
         if (self._operation_mode_selector.mode_index == consts.OP1_MODE_TRANSPORT):
@@ -695,8 +703,12 @@ class OP1(ControlSurface):
 
     def refresh_state(self):
         self.log("REFRESH STATE")
+        self._send_midi(self.enable_sequence)
         self.retries_count = 0
-        self.device_connected = False
+        self.device_connected = True
+        self.write_text(' ')
+        self.reset_display_clips()
+        self.update_display_clips()
 
     def build_midi_map(self, midi_map_handle):
         self._current_midi_map = midi_map_handle
