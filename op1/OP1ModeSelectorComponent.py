@@ -207,6 +207,34 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
                 self._swap_listener(self._right_arrow_button,
                                     self.shifted_right_arrow_pressed, self.right_arrow_pressed)
 
+        if (self._current_mode == consts.OP1_MODE_PERFORM):
+            parent_strip = getattr(self._parent, "_channel_strip", None)
+            if (value == 127):
+                # Swap arrows to the 1/8-note nudge handlers.
+                self._swap_listener(self._left_arrow_button,
+                                    self.perform_left_arrow_pressed,
+                                    self.perform_shifted_left_arrow_pressed)
+                self._swap_listener(self._right_arrow_button,
+                                    self.perform_right_arrow_pressed,
+                                    self.perform_shifted_right_arrow_pressed)
+                # Temporarily release encoder 1 from volume so our listener
+                # can own it. Volume is restored on shift release.
+                if parent_strip is not None:
+                    parent_strip.set_volume_control(None)
+                if not self._encoder_1.value_has_listener(self.perform_shifted_e1_loop):
+                    self._encoder_1.add_value_listener(self.perform_shifted_e1_loop)
+            else:
+                self._swap_listener(self._left_arrow_button,
+                                    self.perform_shifted_left_arrow_pressed,
+                                    self.perform_left_arrow_pressed)
+                self._swap_listener(self._right_arrow_button,
+                                    self.perform_shifted_right_arrow_pressed,
+                                    self.perform_right_arrow_pressed)
+                if self._encoder_1.value_has_listener(self.perform_shifted_e1_loop):
+                    self._encoder_1.remove_value_listener(self.perform_shifted_e1_loop)
+                if parent_strip is not None:
+                    parent_strip.set_volume_control(self._encoder_1)
+
         if value == 127:
             self._parent.shift_pressed = True
             self._parent._transport.set_punch_buttons(None, None)
@@ -257,6 +285,38 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
     def shifted_right_arrow_pressed(self, value):
         if (value == 127):
             self._parent.song().jump_to_next_cue()
+
+    # ---------- Perform-mode playhead / loop controls ----------
+
+    def perform_left_arrow_pressed(self, value):
+        if value == 127:
+            self._parent.song().scrub_by(-1.0)
+
+    def perform_right_arrow_pressed(self, value):
+        if value == 127:
+            self._parent.song().scrub_by(1.0)
+
+    def perform_shifted_left_arrow_pressed(self, value):
+        if value == 127:
+            self._parent.song().scrub_by(-0.5)  # 1/8 note in 4/4
+            self._overlay("nudge", "-1/8", duration=0.6)
+
+    def perform_shifted_right_arrow_pressed(self, value):
+        if value == 127:
+            self._parent.song().scrub_by(0.5)  # 1/8 note in 4/4
+            self._overlay("nudge", "+1/8", duration=0.6)
+
+    def perform_shifted_e1_loop(self, value):
+        song = self._parent.song()
+        delta = 1 if value == 4 else -1
+        length = song.loop_length
+        new_start = song.loop_start + delta
+        if new_start < 0:
+            new_start = 0
+        song.loop_start = new_start
+        # Writing loop_length preserves the loop's duration by shifting end.
+        song.loop_length = length
+        self._overlay("loop move", str(new_start), duration=0.6)
 
     def set_loop(self, index, set_loop_start):
         # handling set loop
@@ -367,6 +427,13 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
             send_controls = self._encoder_3, self._encoder_4,
             # setting send encoders
             self._channel_strip.set_send_controls(tuple(send_controls))
+
+            # Perform-mode arrows scrub the playhead; shift+arrows nudge by
+            # 1/8 note; shift+blue encoder moves the loop region while
+            # preserving its length. Listeners are added here and torn down
+            # in clear(); the shift state is handled by shift_pressed().
+            self._left_arrow_button.add_value_listener(self.perform_left_arrow_pressed)
+            self._right_arrow_button.add_value_listener(self.perform_right_arrow_pressed)
 
 
 
@@ -490,6 +557,14 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
 
         if (self._current_mode == consts.OP1_MODE_PERFORM):
             self._parent.log("CLEARING PERFORM MODE")
+
+            # Both the unshifted and shifted variants can be live; strip
+            # them all and the loop-encoder override too.
+            self._safe_remove(self._left_arrow_button, self.perform_left_arrow_pressed)
+            self._safe_remove(self._right_arrow_button, self.perform_right_arrow_pressed)
+            self._safe_remove(self._left_arrow_button, self.perform_shifted_left_arrow_pressed)
+            self._safe_remove(self._right_arrow_button, self.perform_shifted_right_arrow_pressed)
+            self._safe_remove(self._encoder_1, self.perform_shifted_e1_loop)
 
         elif (self._current_mode == consts.OP1_MODE_TRANSPORT):
             self._parent.log("CLEARING TRANSPORT MODE")
