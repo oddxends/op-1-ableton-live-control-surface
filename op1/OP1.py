@@ -114,6 +114,12 @@ class OP1(ControlSurface):
             self._session_record_cb = None
             self._record_mode_cb = None
 
+            # Color-strip pulse state: cell_index -> (r, g, b) override drawn
+            # by update_display_clips() instead of the real clip color until
+            # _pulse_until elapses.
+            self._pulse_overrides = {}
+            self._pulse_until = 0.0
+
             self.text_start_sequence = (0xf0, 0x00, 0x20, 0x76, 0x00, 0x03)
             self.text_end_sequence = (0xf7,)
             self.enable_sequence = (0xf0, 0x00, 0x20, 0x76, 0x00, 0x01, 0x02, 0xf7)
@@ -377,6 +383,9 @@ class OP1(ControlSurface):
 
     def session_offset_changed(self, *args):
         # Live 11+ passes (track_offset, scene_offset); older versions pass nothing.
+        # Clear any stale pulse overrides because cell indexes no longer line
+        # up with their original tracks.
+        self._pulse_overrides.clear()
         self.update_display_clips()
 
     # ---------- Display overlay ----------
@@ -465,15 +474,21 @@ class OP1(ControlSurface):
             return
         is_master = (track == self.song().master_track)
 
+        def make_cb(label, prop_name):
+            def cb():
+                self.set_overlay(label, "on" if getattr(track, prop_name) else "off")
+                self.pulse_track(track)
+            return cb
+
         if not is_master:
-            cb_mute = lambda: self.set_overlay("mute", "on" if track.mute else "off")
+            cb_mute = make_cb("mute", "mute")
             try:
                 track.add_mute_listener(cb_mute)
                 self._track_listeners.append((track, "mute", cb_mute))
             except (RuntimeError, AssertionError, AttributeError):
                 pass
 
-        cb_solo = lambda: self.set_overlay("solo", "on" if track.solo else "off")
+        cb_solo = make_cb("solo", "solo")
         try:
             track.add_solo_listener(cb_solo)
             self._track_listeners.append((track, "solo", cb_solo))
@@ -481,7 +496,7 @@ class OP1(ControlSurface):
             pass
 
         if getattr(track, "can_be_armed", False):
-            cb_arm = lambda: self.set_overlay("arm", "on" if track.arm else "off")
+            cb_arm = make_cb("arm", "arm")
             try:
                 track.add_arm_listener(cb_arm)
                 self._track_listeners.append((track, "arm", cb_arm))
@@ -651,6 +666,7 @@ class OP1(ControlSurface):
             # Lift the suppression and show the one summary line.
             self._suppress_overlay_until = 0.0
             self.set_overlay("clear all", "done")
+            self.pulse_all()
 
     def clear_return_track_assignment(self, strip):
         # clear return track assingments
@@ -801,11 +817,9 @@ class OP1(ControlSurface):
         self._send_midi(sequence)
 
     def update_display_clips(self):
-        # self.log("UPDATING DISPLAY CLIPS")
         count = 0
         colors = []
         length = []
-        sequence = ()
 
         tracks_len = len(self.song().tracks) - self._session._track_offset
 
@@ -814,6 +828,10 @@ class OP1(ControlSurface):
 
         for i in range(tracks_len):
             count += 1
+            if i in self._pulse_overrides:
+                colors += self._pulse_overrides[i]
+                continue
+
             clip_slot = self._session.scene(0).clip_slot(i)
 
             color = (0x00, 0x00, 0x00)
@@ -831,6 +849,37 @@ class OP1(ControlSurface):
         sequence = self.text_color_start_sequence + tuple(length) + \
             tuple(colors) + self.text_end_sequence
         self._send_midi(sequence)
+
+    # ---------- Color-strip pulse ----------
+
+    def pulse_cell(self, cell_index, duration=None):
+        if not consts.ENABLE_STRIP_PULSE:
+            return
+        if not (0 <= cell_index < consts.NUM_TRACKS):
+            return
+        self._pulse_overrides[cell_index] = consts.STRIP_PULSE_COLOR
+        self._pulse_until = time.time() + (duration or consts.STRIP_PULSE_DURATION)
+        self.update_display_clips()
+
+    def pulse_track(self, track, duration=None):
+        if track is None or not consts.ENABLE_STRIP_PULSE:
+            return
+        try:
+            tracks = list(self.song().tracks)
+            if track not in tracks:
+                return
+            cell = tracks.index(track) - self._session._track_offset
+            self.pulse_cell(cell, duration)
+        except (RuntimeError, AttributeError, ValueError):
+            pass
+
+    def pulse_all(self, duration=None):
+        if not consts.ENABLE_STRIP_PULSE:
+            return
+        for i in range(consts.NUM_TRACKS):
+            self._pulse_overrides[i] = consts.STRIP_PULSE_COLOR
+        self._pulse_until = time.time() + (duration or consts.STRIP_PULSE_DURATION)
+        self.update_display_clips()
 
     def update_display_clip_mode(self):
         txt = self.song().view.selected_scene.name.lower()
@@ -878,6 +927,11 @@ class OP1(ControlSurface):
         if self.retries_count < 5:
             self.retries_count += 1
             self._send_midi(self.enable_sequence)
+
+        # Restore the color strip once a pulse has expired.
+        if self._pulse_overrides and time.time() >= self._pulse_until:
+            self._pulse_overrides.clear()
+            self.update_display_clips()
 
         # Keep an active overlay on screen until it expires, then force one
         # redraw so non-periodic modes (perform / clip / mixer) come back.

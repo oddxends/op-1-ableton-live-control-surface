@@ -273,6 +273,11 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
         if parent is not None and hasattr(parent, "set_overlay"):
             parent.set_overlay(line1, line2, duration=duration)
 
+    def _pulse_cell(self, cell_index):
+        parent = self._parent
+        if parent is not None and hasattr(parent, "pulse_cell"):
+            parent.pulse_cell(cell_index)
+
     def note_key_pressed(self, value, sender):
         # determining index of note key button in list
         index = self.note_keys_buttons.index(sender)
@@ -291,6 +296,8 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
 
             if (index < len(all_tracks)):
                 self.song().view.selected_track = all_tracks[index]
+                if value == 127:
+                    self._pulse_cell(index)
 
         elif (self._current_mode == consts.OP1_MODE_TRANSPORT):
             # if on transport mode, use key to set loop
@@ -300,6 +307,7 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
         elif (self._current_mode == consts.OP1_MODE_CLIP):
             if value == 127:
                 self._overlay("launch", "clip " + str(index + 1))
+                self._pulse_cell(index)
 
     def note_key_shifted_pressed(self, value, sender):
         # determining index of note key button in list
@@ -313,6 +321,7 @@ class OP1ModeSelectorComponent(ModeSelectorComponent):
         elif (self._current_mode == consts.OP1_MODE_CLIP):
             if value == 127:
                 self._overlay("stop", "track " + str(index + 1))
+                self._pulse_cell(index)
 
     def clip_color_changed(self):
         self._parent.log("clip color changed")

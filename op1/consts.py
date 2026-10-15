@@ -19,6 +19,13 @@
 
 VERSION = "2.0"
 
+# When True, mute/solo/arm/launch/select actions briefly flash the
+# corresponding cell on the OP-1 color strip. Disable if a dropped SysEx
+# ever leaves a cell stuck at the pulse color.
+ENABLE_STRIP_PULSE = True
+STRIP_PULSE_DURATION = 0.15  # seconds; also governs the "clear all" sweep.
+STRIP_PULSE_COLOR = (0x7F, 0x7F, 0x7F)  # white, 7-bit per channel.
+
 # Number of tracks
 
 NUM_TRACKS = 13
